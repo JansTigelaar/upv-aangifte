@@ -4,12 +4,112 @@
 # COMMAND ----------
 
 from pyspark.sql import functions as F
+from pyspark.sql.types import StringType, ArrayType, StructType, StructField, FloatType
+import re
+import unicodedata
 
 # COMMAND ----------
 
 # DBTITLE 1,SETTINGS
 INBOUND_START = '2025-01-01'
 INBOUND_END = '2025-12-31'
+COUNTRY_CODES = ["NL", "BE"]
+CUTOFF_WEIGHT_IN_GRAMS = 250000
+
+# UPV aangifte mcc_3 categories (manually curated - no direct custom code mapping available)
+UPV_MCC_3_NAMES = [
+    "PW7C - Mens Casual Trousers", "MX5M - Ladies Shorts", "RX5X - Ladies Jeans",
+    "WX6H - Ladies Briefs", "FJ3G - Ladies Cardigans", "JC9C - Ladies T-shirts",
+    "VW7V - Ladies Jackets", "QM2R - Ladies Non-wired Bras", "CW4M - Ladies Denim Shorts",
+    "CR9V - Ladies Beach Bottoms Other", "WG8G - Ladies Knitwear Other", "PX8M - Ladies Pullovers",
+    "RQ7H - Mens Chino", "RJ6J - Ladies Trousers", "WR2V - Baby Changing & Bath",
+    "MP4C - Ladies Capris", "RX9Q - Girls Pullovers & Sweats", "PX4F - Ladies Tops Knitted",
+    "XR5Q - Girls Longsleeves", "FH8X - Ladies Dresses (Alliance)", "VM8G - Mens Knitwear",
+    "VX9M - Ladies Singlets", "VP9Q - Girls Shortsleeves", "RM8Q - Ladies Sports Shirts",
+    "CR2C - Girls Skirts", "VC7R - Mens Sweats", "CR5F - Cushion & Covers", "XJ9X - Mens Formal Shirts",
+    "FH4W - Ladies Pyjama Tops", "QJ6F - Mens Polos", "WF2V - Mens Sports Sweaters", "QH3G - Ladies Outerwear Other",
+    "QW3G - Ladies Sports Sweaters", "JF2G - Ladies Sweaters", "PJ6M - Mens Casual Shirts", "GJ2M - Ladies Blazers",
+    "HP6V - Ladies Tops Woven", "XF6P - Ladies Sports Pants", "QR5C - Ladies Fashion Scarves", "MJ4J - Girls Shorts",
+    "CH3F - Mens Jackets", "VM2R - Ladies Nightwear Other", "MF5G - Boys Shortsleeves", "XJ2G - Mens Jeans",
+    "GQ8F - Ladies Skirts", "RF4H - Ladies Dresses Knitted", "PR4R - Ladies Pushup Bikini Tops", "CP7W - Ladies Socks",
+    "CJ2M - Girls Jeans", "HR6Q - Ladies Bodies", "JP8V - Ladies Sports Jackets", "JV2G - Boys Shirts",
+    "QP9R - Ladies Winter Scarves", "GJ7C - Mens Ski Socks", "VW5W - Ladies Shapewear Shorts", "RJ2X - Ladies Underwire Bikini Tops",
+    "WJ8F - Girls Bikinis Other", "WG6P - Ladies Underwear Vests", "VR8F - Ladies Sports Shorts", "WF7W - Mens Sports Shirts",
+    "HQ9H - Ladies Blouses", "MR9F - Ladies Sportswear Other", "CR9W - Ladies Beach Briefs", "WG4H - Boys Pullovers & Sweats",
+    "HP9V - Ladies Jegging", "HG2R - Girls Beachwear Other", "GP2Q - Ladies Hipsters", "FC5R - Maternity Other",
+    "CQ8F - Ladies Jumpsuits", "PJ3F - Girls Trousers", "QV3M - Mens Formal Jackets", "RX2Q - Boys Sleepwear", "JH2J - Baby Bedding",
+    "JQ4R - Ladies Sports Bras", "GF6R - Mens Parka Jackets", "XV5X - Boys Outerwear", "CJ3X - Bath Textiles",
+    "GP7G - Ladies Push-up Bras", "VQ9M - Mens Jogging Bottoms", "QV9X - Boys Trousers", "XR8H - Girls Sport Swimsuits",
+    "XF2X - Ladies Treggings", "QC6C - Boys Shorts", "PM6X - Mens Loungewear Bottoms", "MG8M - Girls Jumpsuits (incl. box suit)",
+    "XP7F - Ladies Shapewear Vests", "HF2C - Ladies Sport Swimsuits", "MP7R - Ladies Padded Outerwear", "HF5G - Duvet Cover Sets",
+    "QR5F - Ladies Shaping Swimsuits Cupsizes", "PF6M - Mens Swim Shorts", "QF5J - Mens Sports Jackets", "JX5C - Mens Bodywarmers",
+    "MH7R - Ladies Nightshirts", "VQ4H - Ladies Bermuda Shorts", "QH5V - Mens Underwear Other", "HC5X - Ladies Pyjama Sets",
+    "CJ6J - Mens Pyjama Sets", "RQ6Q - Ladies Bikini Sets", "PJ4H - Ladies Dresses Woven", "CJ5J - Ladies Shortamas",
+    "FX7W - Beachwear Clothing", "WR6C - Ladies Denim Jackets", "VJ2G - Boys Sports Pants", "JQ4C - Ladies Shaping Swimsuits",
+    "WF9G - Mens Winter Scarves", "FQ6W - Ladies Raincoats", "FM5M - Ladies Tunics Woven", "PM8G - Mens Chino Shorts",
+    "QX2V - Pillowcases", "GF7X - Boys Swim Boxers", "QX4M - Ladies Ski Socks", "MQ3P - Mens Sports Shorts", "JC9H - Ladies Leggings",
+    "QC6V - Ladies Parkas", "MQ3M - Ladies Brazilians", "HR7P - Girls Sports Jackets", "WQ2V - Mens Padded Coats",
+    "QG3P - Boys Sports Tracksuits", "MG4X - Mens Boxershorts", "WJ3X - Ladies Underwear Shorts", "FQ2X - Ladies Thongs",
+    "CM8Q - Girls Tights", "FG3M - Mens Knit Cardigans", "CR9M - Ladies Bodies Shapewear", "WR4V - Mens Shorts Other",
+    "PC3H - Boys Underwear (incl. romper)", "MW2V - Girls Sleepwear", "PC7X - Boys Beachwear Other", "WR8H - Mens Underwear T-shirts",
+    "WX9G - Ladies Bathrobes", "CQ4Q - Ladies Playsuits", "XW5R - Girls Sports Shirts", "PJ4P - Ties & Bow Ties",
+    "QR8Q - Ladies Triangle Bikini Tops", "GJ5Q - Childrens Ski Socks", "WV8R - Ladies Crop Bikini Tops", "GP4H - Fitted Sheets",
+    "HX9G - Ladies Shapewear Briefs", "PV3C - Girls Triangle Bikinis", "JF7J - Mens Sweat Shorts", "XP4R - Boys Sports Sweaters",
+    "XH2X - Ladies Pyjama Bottoms", "CQ4G - Ladies Swimsuits", "VW2F - Boys Sports Shirts", "FR2H - Mens Thermo", "HC2X - Beach Towels",
+    "XF6Q - Mens Loungewear Tops", "HM9W - Ladies Maxibriefs", "WX8P - Ladies Tunics (Alliance)", "RV2M - Mens Cargo Shorts",
+    "CJ7P - Mens Fashion Scarves", "RQ9M - Boys Sports Jackets", "VQ5C - Ladies Maxi Dresses", "JX3V - Maternity Beachwear",
+    "QP7Q - Ladies Beach Tie-knot Briefs", "RC2G - Mens Pyjama Bottoms", "MR5H - Ladies Slipdresses", "VR9C - Ladies Beach Folded Briefs",
+    "GJ7Q - Mens Cargo Trousers", "QP6C - Mens Coats", "WX7F - Sports Socks", "QG3J - Mens Bathrobes", "PC6F - Ladies Loungewear Bottoms",
+    "CR2R - Boys Onesies (incl. box suit)", "CG9P - Mens Denim Jackets", "GC4C - Girls Sports Pants", "FW7H - Sarongs",
+    "JF3J - Ladies Leather & PU Outerwear", "HF8C - Ladies Loose Collars", "GR5X - Ladies Tunics Knitted", "GW7V - Ladies House Suits",
+    "JM9C - Ladies Halter Bikini Tops", "QW5F - Ladies Swimsuits Cupsizes", "QG9J - Mens Briefs", "WR9M - Girls Sports Shorts",
+    "MG6C - Girls Sports Sweaters", "XR3P - Mens Nightwear Other", "VJ6M - Maternity Tops", "PR4C - Legwear Other", "XH6R - Mens Underwear Vests",
+    "GR7H - Boys Sets", "RX4Q - Baby Boxkleden", "FR6F - Mens Beachwear Other", "HX2W - Ladies Shapewear Bottoms Other",
+    "GR6C - Girls Swimsuits", "MP9X - Ladies Minimizers", "JF7F - Girls Underwear (incl. romper)", "PV9M - Ladies Boleros",
+    "MF4G - Mens Rain Coats", "FC2C - Mens Pyjama Tops", "GX6W - Ladies Tankini Tops", "XQ2H - Mens Underwear Sports",
+    "QH5X - Mattress Protectors", "FG7P - Mens Leather Jackets", "CX7X - Ladies Maternity Bras", "GQ4R - Ladies Lingerie Other",
+    "MR7H - Ladies Shapewear Dresses", "MP8W - Girls Sportswear Other", "HV9C - Ladies Sports Tracksuits", "VP4Q - Girls Sports Tracksuits",
+    "CJ9P - Ladies Tops (Alliance)", "QF6P - Girls Outerwear", "VQ4Q - Mens Socks", "GC3Q - Ladies Coats", "QV4P - Childrens Socks",
+    "XW9C - Ladies Bikini Tops Other", "PM9Q - Mens T-shirts", "FM4M - Ladies Wired Bras", "GP8C - Ladies Loungewear Tops",
+    "XM7V - Girls Dresses", "RH2R - Mens Denim Shorts", "FX5J - Mens Swim Boxers", "WH9C - Ladies Padded Bras",
+    "XF6C - Mens Sweats Cardigan", "JM7P - Boys Jeans", "XV9J - Ladies Bottoms Other", "FX5W - Maternity Bottoms", "VM3J - Ladies Gloves",
+    "XH7Q - Girls Leggings", "JH5H - Ladies Bras Other", "JQ9F - Ladies Tights", "RX9H - Mens Sports Tracksuits", "XF2F - Mens Sports Pants",
+    "CX2P - Boys Longsleeves", "PG9M - Boys Swim Shorts", "HG6M - Girls Sets", "VQ7P - Ladies Underwear Accessories", "VC9M - Ladies Bandeau Bikini Tops",
+    "RF7M - Boys Sports Shorts", "VG7V - Mens Gloves", "VX9V - Kitchen & Table Textiles"
+]
+
+# UPV aangifte suppliers (manually curated)
+UPV_SUPPLIERS = [
+    "Sisters Point A/S", "Sassa Mode GmbH", "Underwear Sweden AB",
+    "ABA Fashion Limited", "Mos Mosh A/S", "Zizzi Denmark ApS",
+    "Lee Tai Sang Swimwear Factory Ltd", "Mac Mode GmbH & Co. KGaA", "Dutch Home Company B.V/Arli Group B.V.",
+    "B-Boo Baby & Lifestyle GmbH", "DK Company Vejle A/S", "TGS DIS TICARET A.S.",
+    "Tas Textiles India Private Ltd.", "DKH Retail Limited", "Röhnisch Sportswear AB",
+    "Madam Stoltz Aps", "Threebyone Europe AB", "Sofie Schnoor A/S", "Lyle & Scott Ltd",
+    "Nümph A/S", "Levi Strauss & Co Europe", "Modström", "JL Company Ltd", "Aim Apparel AB", "Guess Europe sagl",
+    "Soya Concept as", "Töjfabrik Aps / Wear Group A/S", "Bloomingville A/S", "Tenson AB", "United Swimwear Apparel Co.,Ltd",
+    "Falke KGAA", "Jack Wolfskin Retail GmbH", "Moss CPH A/S", "Van De Velde NV", "Ralph Lauren France Sas",
+    "Killtec Sport- und Freizeit GmbH", "EOZ NV", "Tonsure ApS", "Champion Products Europe Ltd.", "Magic Apparels Ltd./Red Button",
+    "Mamsy", "ILERI GIYIM SAN VE DIS TIC.STI.", "Zhejiang Sungin Industry Group co.,Ltd.", "Playshoes GmbH", "Rosemunde Aps",
+    "Society of Lifestyle APS", "Noman Terry Towel Mills Limited", "Ningbo China-Blue Fashion Co., Ltd", "All Sport N.V.",
+    "Brands4kids A/S", "Sweatertech Ltd.", "Brands of Scandinavia A/S", "CWF Children Worldwide Fashion", "Nore Tekstil Sanayi Ve Ticaret Ltd.Sti.",
+    "KM Apparel Knit (Pvt) Ltd.", "Udare Ltd.", "CKS Fashion", "King Wings International Trading Co., Ltd", "A.R.W. NV",
+    "Ningbo Leader Garment Co. LTD", "VERVALLEN Focus International Ltd", "W.S. Engross APS", "Sona Enterprises", "Renfold Ltd",
+    "CECEBA Group GmbH", "Sandgaard A/S", "TB International GmbH", "Kam International", "Haddad Brands Europe", "Urban Brands ApS",
+    "Bruuns Bazaar A/S", "WDKX Ltd ($)", "Mads Norgaard - Copenhagen A/S", "Tamara Tekstil Sanayi ve Dış Ticaret Ltd Sti",
+    "GANT DACH GmbH", "Regatta ltd.", "Mat Fashion", "Sportswear Company s.p.a.(Stone Island)", "New Visions Berlin GmbH",
+    "Stone Island Distribution S.R.L.", "VAUDE SPORT GmbH & Co. KG", "Lexson Brands B.V.", "J Carter Sporting Club Ltd - Castore",
+    "Nudie Jeans Marketing AB", "Marc O'Polo International GmbH", "M.G. Ekkelboom B.V.", "Liu Jo Benelux N.V.", "Treasure Will Limited",
+    "And Bording Aps", "Choice Clothing co. PVT.LTD", "Sports Group Denmark A/S", "NÜ A/S / Zoey", "Westex India",
+    "Shiv Shakti Home", "AycemTekstil San.Tic. Ltd.ŞTİ.", "Olymp Bezner Kg", "Rugs Creation", "ISYGS", "Pacific Jeans Ltd.",
+    "Medico sports fashion GmbH", "PNG Textiles Pvt Ltd", "Brave kid SRL", "Grimmer & Sommacal", "Felina gmbh",
+    "Hangzhou Bestsino Imp & Exp Co Ltd", "F&H of Scandinavia A/S", "Sharda Exports", "Laaj International", "Jai Knits Creations",
+    "Woolrich Europe S.p.A", "Bestwin (Shanghai) Home Fashion Ltd", "Didriksons Deutschland GmbH", "The Trade Aid Company",
+    "Peninsula Fashion Knitwear Limited", "Sovedam", "Ever-Glory Int. Group Apparel inc.", "Zaber & Zubair Fabrics Ltd",
+    "WDKX Ltd. (€)", "Yab Yum Clothing Co. Aps", "HTS Textilvertriebs GmbH", "DIESEL SPA", "Industrias Plasticas IGOR",
+    "Fashion Club 70 N.V.", "Levi's Footwear & Accessories (Switzerland) SA", "ParkStor Tekstil Tic.Ltd.Sti.", "Sumec Textile & Light Industry Co Ltd",
+    "Liewood A/S", "Coram DIY NV", "L.C. Jordan Company Limited", "Norban Comtex Ltd.", "Brand Machine International Limited"
+]
 
 # COMMAND ----------
 
@@ -146,8 +246,7 @@ inbound = (
     .orderBy("article_id")
 )
 
-country_code = ["NL", "BE"]
-inbound = (inbound.where(F.col("country_code").isin(country_code)))
+inbound = (inbound.where(F.col("country_code").isin(COUNTRY_CODES)))
 
 #  Display the result
 display(inbound)
@@ -161,10 +260,9 @@ display(inbound)
 # COMMAND ----------
 
 # DBTITLE 1,Weight
-cutoff_weight_in_grams = 250000
 article_weight = (spark.read.table("prod_wrg_deltalake.dl_gld.articles")
            .select("article_id","preferred_supplier_id","article_gross_weight_num")
-           .withColumn('article_gross_weight_num_corrected', F.when(F.col('article_gross_weight_num')>cutoff_weight_in_grams, cutoff_weight_in_grams).otherwise(F.col('article_gross_weight_num')))
+           .withColumn('article_gross_weight_num_corrected', F.when(F.col('article_gross_weight_num')>CUTOFF_WEIGHT_IN_GRAMS, CUTOFF_WEIGHT_IN_GRAMS).otherwise(F.col('article_gross_weight_num')))
            .distinct()
            .na.fill(0)
           )
@@ -191,119 +289,111 @@ display(inbound_material_weight.count())
 
 # COMMAND ----------
 
-from pyspark.sql import functions as F
-from pyspark.sql.types import StringType, ArrayType, StructType, StructField
-import re
-import unicodedata  
-
 # Define a list of materials to search for
 materials_list = [
-    "acetaat", "acryl", "alpaca", "angora", "bamboe", "canvas", 
-    "dons", "edelsteen", "eendenveren", "elastaan", 
-    "glas", "halfedelsteen", "hennep", "ijzer", "imitatiebont", "imitatiesuede", "jute", 
-    "kapok", "kasjmier", "katoen", "kokosvezel", "kristal", "kurk", "leer", "linnen", 
+    "acetaat", "acryl", "alpaca", "angora", "bamboe", "canvas",
+    "dons", "edelsteen", "eendenveren", "elastaan",
+    "glas", "halfedelsteen", "hennep", "ijzer", "imitatiebont", "imitatiesuede", "jute",
+    "kapok", "kasjmier", "katoen", "kokosvezel", "kristal", "kurk", "leer", "linnen",
     "lyocell", "messing", "metaal", "metaaldraad", "microleer", "imitatieleer",
     "mohair", "neopreen", "palmbladeren", "papier", "parel", "polyacryl",
-    "polyamide", "polyester", "polyethyleen", "polylactide", 
-    "polyolefins", "polypropyleen", "polyurethaan", "ramie", "riet", "rubber", "rvs", 
-    "siliconen", "sterling zilver", "stro", "suede", "viscose", "wol", 
+    "polyamide", "polyester", "polyethyleen", "polylactide",
+    "polyolefins", "polypropyleen", "polyurethaan", "pvc", "ramie", "riet", "rubber", "rvs",
+    "siliconen", "staal", "sterling zilver", "stro", "suede", "viscose", "wol",
     "zijde", "zink", "koper", "polycarbonaat", "titanium"
 ]
 
-# Dictionary for edge case mappings
+# Dictionary for edge case mappings (alternative names -> standard Dutch name)
 edge_case_mappings = {
-    "leer": "leer", 
-    "polycarbonaat": "polycarbonaat", 
-    "nylon": "polyamide", 
-    "pu": "polyurethaan", 
+    # Dutch variants
+    "leer": "leer",
+    "polycarbonaat": "polycarbonaat",
     "staal": "staal",
     "metaal": "metaal",
-    "cotton": "katoen", 
-    "rayon": "viscose", 
-    "suede": "leer",
     "koper": "koper",
-    "tencel": "lyocell",
-    "spandex": "elastaan",
-    "elastan": "elastaan",
-    "elasthaan": "elastaan",
-    "tpu": "polyurethaan",
-    "modal": "viscose",
-    "bamboo": "bamboe",
-    "elasthan": "elastaan",
-    "elastane": "elastaan",
     "nubuck": "leer",
-    "lycra": "elastaan",
-    "vinyl": "pvc",
-    "cashmere": "kasjmier",
     "merinowol": "wol",
     "schapensleer": "leer",
     "schaapsleer": "leer",
+    "schapenleer": "leer",
     "buffelleer": "leer",
     "koeienleer": "leer",
-    "coated leer": "leer",
-    "schapenleer": "leer",
     "rundleer": "leer",
-    "runderleer": "leer"
-}
-
-# # Define a dictionary for manual overrides
-manual_overrides = {
-"16231574": ["katoen - 80", "polyester - 20"],
-"16231596": ["katoen - 80", "polyester - 20"],
-"16643268": ["katoen - 80, polyester - 20"],
-"16646435": ["polyamide - 60, polyester - 25, elastaan 15"],
-"17200566": ["polyester 88, elastaan - 12"],
-"17200577": ["polyester 88, elastaan - 12"],
-"17200582": ["polyester 87, elastaan - 13"],
-"17200560": ["polyester 90, elastaan - 10"]
+    "runderleer": "leer",
+    "coated leer": "leer",
+    "elastan": "elastaan",
+    "elasthaan": "elastaan",
+    "elasthan": "elastaan",
+    # Brand names -> generic
+    "nylon": "polyamide",
+    "tencel": "lyocell",
+    "lycra": "elastaan",
+    "spandex": "elastaan",
+    "modal": "viscose",
+    # Abbreviations
+    "pu": "polyurethaan",
+    "tpu": "polyurethaan",
+    # English -> Dutch
+    "cotton": "katoen",
+    "rayon": "viscose",
+    "bamboo": "bamboe",
+    "cashmere": "kasjmier",
+    "vinyl": "pvc",
+    "wool": "wol",
+    "silk": "zijde",
+    "linen": "linnen",
+    "leather": "leer",
+    "glass": "glas",
+    "iron": "ijzer",
+    "cork": "kurk",
+    "hemp": "hennep",
+    "paper": "papier",
+    "pearl": "parel",
+    "copper": "koper",
+    "rubber": "rubber",
+    "steel": "staal",
+    "brass": "messing",
+    "down": "dons",
+    "jute": "jute",
+    "canvas": "canvas",
+    "suede": "suede",
+    "velvet": "fluweel",
+    "acrylic": "acryl",
+    "polyester": "polyester",
+    "polyamide": "polyamide",
+    "polyurethane": "polyurethaan",
+    "polypropylene": "polypropyleen",
+    "polyethylene": "polyethyleen",
 }
 
 # Function to normalize text
 def normalize_text(text):
     return unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('utf-8')
 
-def process_material_udf(material_value, article_id):
+def process_material_udf(material_value):
     if not material_value:
         return {"materials": [], "edge_case_flag": "No"}
-    
+
     results = []
     edge_case_used = False
-    material_parts = re.split(r"[,/]", material_value)  # Split by commas and slashes
-    
+    material_parts = re.split(r"[,/]", material_value)
+
     for part in material_parts:
-        # Extract percentage and material name
-        percentage_match = re.search(r"(\d+)%", part)  # Match percentage
+        percentage_match = re.search(r"(\d+)%", part)
         percentage = percentage_match.group(1) if percentage_match else None
-        
-        # Normalize and clean the material name
+
         raw_material = normalize_text(re.sub(r"[\d%]+|\s+", " ", part).strip().lower())
-        
-        # Check for manual overrides first
-        if article_id in manual_overrides:
-            # Use manual override without modification, including percentage
-            results.extend(manual_overrides[article_id])  # Add manual override materials
-            edge_case_used = True  # Set edge case flag to True
+
+        if raw_material in edge_case_mappings:
+            edge_case_used = True
+            mapped_material = edge_case_mappings[raw_material]
         else:
-            # Check if the material is mapped using an edge case
-            if raw_material in edge_case_mappings:
-                edge_case_used = True
-                mapped_material = edge_case_mappings[raw_material]
-            else:
-                mapped_material = raw_material
-            
-            # Validate material against the predefined list
-            if mapped_material in materials_list:
-                # Only set percentage to 100 if it's not in the manual overrides
-                if percentage is None:  # Add percentage only if it is missing
-                    percentage_value = "100"
-                else:
-                    percentage_value = percentage
-                
-                results.append(f"{mapped_material} - {percentage_value}")
-            # else:
-                # Material is not in the list; exclude it
-                # display(f"Excluded unmatched material: {raw_material}")
-    
+            mapped_material = raw_material
+
+        if mapped_material in materials_list:
+            percentage_value = percentage if percentage else "100"
+            results.append(f"{mapped_material} - {percentage_value}")
+
     return {"materials": results, "edge_case_flag": "Yes" if edge_case_used else "No"}
 
 
@@ -316,10 +406,10 @@ schema = StructType([
 
 process_material = F.udf(process_material_udf, schema)
 
-# Apply the UDF to process materials and percentages, passing article_id
+# Apply the UDF to process materials and percentages
 inbound_with_matches = inbound_material_weight.withColumn(
     "Processed_Data",
-    process_material(F.col("Y02 - materiaal"), F.col("article_id"))
+    process_material(F.col("Y02 - materiaal"))
 )
 
 # Extract materials and edge case flag into separate columns
@@ -378,8 +468,19 @@ display(edge_case_count_df)
 
 # COMMAND ----------
 
-from pyspark.sql import functions as F
-from pyspark.sql.types import FloatType
+# DBTITLE 1,Helper: explode materials and calculate weight
+def explode_materials_with_weight(df, materials_col="Materials_Percentages_Fixed", weight_col="Material_Weight_kg"):
+    """Explode material-percentage pairs and calculate material weight per row."""
+    return (
+        df.select(
+            "*",
+            F.explode(materials_col).alias("Material_Percentage_Pair")
+        )
+        .withColumn("Material", F.trim(F.regexp_extract(F.col("Material_Percentage_Pair"), r"^(.+?) - \d+", 1)))
+        .withColumn("Percentage", F.regexp_extract(F.col("Material_Percentage_Pair"), r"- (\d+\.?\d*)$", 1).cast(FloatType()))
+        .filter(F.col("Percentage").isNotNull())
+        .withColumn(weight_col, (F.col("Percentage") / 100) * (F.col("article_gross_weight_num") / 1000) * F.col("net_despatch_qty"))
+    )
 
 # COMMAND ----------
 
@@ -392,30 +493,8 @@ matched_articles = matched_articles.filter(F.col("business_model_desc") == "Priv
 
 print(f"Total articles in Private Label: {matched_articles.count()}")
 
-# Explode the Materials_Percentages_Fixed array to get one row per material-percentage pair
-exploded_materials = matched_articles.select(
-    "article_id",
-    "bss_2_name",
-    "mcc_1_name",
-    "net_despatch_qty",
-    "article_gross_weight_num",
-    F.explode("Materials_Percentages_Fixed").alias("Material_Percentage_Pair")
-)
-
-# Extract material name and percentage
-exploded_materials = exploded_materials.withColumn(
-    "Material",
-    F.trim(F.regexp_extract(F.col("Material_Percentage_Pair"), r"^(.+?) - \d+", 1))
-).withColumn(
-    "Percentage",
-    F.regexp_extract(F.col("Material_Percentage_Pair"), r"- (\d+\.?\d*)$", 1).cast(FloatType())
-).filter(F.col("Percentage").isNotNull())
-
-# Calculate material weight: (Percentage / 100) * (gross_weight_kg) * quantity
-exploded_materials = exploded_materials.withColumn(
-    "Material_Weight_kg",
-    (F.col("Percentage") / 100) * (F.col("article_gross_weight_num") / 1000) * F.col("net_despatch_qty")
-)
+# Explode materials and calculate weight
+exploded_materials = explode_materials_with_weight(matched_articles)
 
 # COMMAND ----------
 
@@ -473,8 +552,6 @@ display(material_share_final)
 
 # COMMAND ----------
 
-from pyspark.sql import functions as F
-
 # Select relevant columns from the non_matched_articles DataFrame
 non_matched_articles = non_matched_articles.select(
     "article_id", "article_desc", "preferred_supplier_name", "article_gross_weight_num", "mcc_3_name", "net_despatch_qty", "business_model_desc", "country_code", "article_gross_weight_num"
@@ -493,102 +570,8 @@ non_material_weight_summary_df = non_matched_articles.groupBy(
     F.round(F.sum("Total_Weight"), 2).alias("Total_Weight")
 )
 
-# List of specific mcc_3_name values
-mcc_3_names = [
-    "PW7C - Mens Casual Trousers", "MX5M - Ladies Shorts", "RX5X - Ladies Jeans",
-    "WX6H - Ladies Briefs", "FJ3G - Ladies Cardigans", "JC9C - Ladies T-shirts",
-    "VW7V - Ladies Jackets", "QM2R - Ladies Non-wired Bras", "CW4M - Ladies Denim Shorts",
-    "CR9V - Ladies Beach Bottoms Other", "WG8G - Ladies Knitwear Other", "PX8M - Ladies Pullovers",
-    "RQ7H - Mens Chino", "RJ6J - Ladies Trousers", "WR2V - Baby Changing & Bath",
-    "MP4C - Ladies Capris", "RX9Q - Girls Pullovers & Sweats", "PX4F - Ladies Tops Knitted",
-    "XR5Q - Girls Longsleeves", "FH8X - Ladies Dresses (Alliance)", "VM8G - Mens Knitwear",
-    "VX9M - Ladies Singlets", "VP9Q - Girls Shortsleeves", "RM8Q - Ladies Sports Shirts",
-    "CR2C - Girls Skirts", "VC7R - Mens Sweats", "CR5F - Cushion & Covers", "XJ9X - Mens Formal Shirts",
-    "FH4W - Ladies Pyjama Tops", "QJ6F - Mens Polos", "WF2V - Mens Sports Sweaters", "QH3G - Ladies Outerwear Other",
-    "QW3G - Ladies Sports Sweaters", "JF2G - Ladies Sweaters", "PJ6M - Mens Casual Shirts", "GJ2M - Ladies Blazers",
-    "HP6V - Ladies Tops Woven", "XF6P - Ladies Sports Pants", "QR5C - Ladies Fashion Scarves", "MJ4J - Girls Shorts",
-    "CH3F - Mens Jackets", "VM2R - Ladies Nightwear Other", "MF5G - Boys Shortsleeves", "XJ2G - Mens Jeans",
-    "GQ8F - Ladies Skirts", "RF4H - Ladies Dresses Knitted", "PR4R - Ladies Pushup Bikini Tops", "CP7W - Ladies Socks",
-    "CJ2M - Girls Jeans", "HR6Q - Ladies Bodies", "JP8V - Ladies Sports Jackets", "JV2G - Boys Shirts",
-    "QP9R - Ladies Winter Scarves", "GJ7C - Mens Ski Socks", "VW5W - Ladies Shapewear Shorts", "RJ2X - Ladies Underwire Bikini Tops",
-    "WJ8F - Girls Bikinis Other", "WG6P - Ladies Underwear Vests", "VR8F - Ladies Sports Shorts", "WF7W - Mens Sports Shirts",
-    "HQ9H - Ladies Blouses", "MR9F - Ladies Sportswear Other", "CR9W - Ladies Beach Briefs", "WG4H - Boys Pullovers & Sweats",
-    "HP9V - Ladies Jegging", "HG2R - Girls Beachwear Other", "GP2Q - Ladies Hipsters", "FC5R - Maternity Other",
-    "CQ8F - Ladies Jumpsuits", "PJ3F - Girls Trousers", "QV3M - Mens Formal Jackets", "RX2Q - Boys Sleepwear", "JH2J - Baby Bedding",
-    "JQ4R - Ladies Sports Bras", "GF6R - Mens Parka Jackets", "XV5X - Boys Outerwear", "CJ3X - Bath Textiles",
-    "GP7G - Ladies Push-up Bras", "VQ9M - Mens Jogging Bottoms", "QV9X - Boys Trousers", "XR8H - Girls Sport Swimsuits",
-    "XF2X - Ladies Treggings", "QC6C - Boys Shorts", "PM6X - Mens Loungewear Bottoms", "MG8M - Girls Jumpsuits (incl. box suit)",
-    "XP7F - Ladies Shapewear Vests", "HF2C - Ladies Sport Swimsuits", "MP7R - Ladies Padded Outerwear", "HF5G - Duvet Cover Sets",
-    "QR5F - Ladies Shaping Swimsuits Cupsizes", "PF6M - Mens Swim Shorts", "QF5J - Mens Sports Jackets", "JX5C - Mens Bodywarmers",
-    "MH7R - Ladies Nightshirts", "VQ4H - Ladies Bermuda Shorts", "QH5V - Mens Underwear Other", "HC5X - Ladies Pyjama Sets",
-    "CJ6J - Mens Pyjama Sets", "RQ6Q - Ladies Bikini Sets", "PJ4H - Ladies Dresses Woven", "CJ5J - Ladies Shortamas",
-    "FX7W - Beachwear Clothing", "WR6C - Ladies Denim Jackets", "VJ2G - Boys Sports Pants", "JQ4C - Ladies Shaping Swimsuits",
-    "WF9G - Mens Winter Scarves", "FQ6W - Ladies Raincoats", "FM5M - Ladies Tunics Woven", "PM8G - Mens Chino Shorts",
-    "QX2V - Pillowcases", "GF7X - Boys Swim Boxers", "QX4M - Ladies Ski Socks", "MQ3P - Mens Sports Shorts", "JC9H - Ladies Leggings",
-    "QC6V - Ladies Parkas", "MQ3M - Ladies Brazilians", "HR7P - Girls Sports Jackets", "WQ2V - Mens Padded Coats",
-    "QG3P - Boys Sports Tracksuits", "MG4X - Mens Boxershorts", "WJ3X - Ladies Underwear Shorts", "FQ2X - Ladies Thongs",
-    "CM8Q - Girls Tights", "FG3M - Mens Knit Cardigans", "CR9M - Ladies Bodies Shapewear", "WR4V - Mens Shorts Other",
-    "PC3H - Boys Underwear (incl. romper)", "MW2V - Girls Sleepwear", "PC7X - Boys Beachwear Other", "WR8H - Mens Underwear T-shirts",
-    "WX9G - Ladies Bathrobes", "CQ4Q - Ladies Playsuits", "XW5R - Girls Sports Shirts", "PJ4P - Ties & Bow Ties",
-    "QR8Q - Ladies Triangle Bikini Tops", "GJ5Q - Childrens Ski Socks", "WV8R - Ladies Crop Bikini Tops", "GP4H - Fitted Sheets",
-    "HX9G - Ladies Shapewear Briefs", "PV3C - Girls Triangle Bikinis", "JF7J - Mens Sweat Shorts", "XP4R - Boys Sports Sweaters",
-    "XH2X - Ladies Pyjama Bottoms", "CQ4G - Ladies Swimsuits", "VW2F - Boys Sports Shirts", "FR2H - Mens Thermo", "HC2X - Beach Towels",
-    "XF6Q - Mens Loungewear Tops", "HM9W - Ladies Maxibriefs", "WX8P - Ladies Tunics (Alliance)", "RV2M - Mens Cargo Shorts",
-    "CJ7P - Mens Fashion Scarves", "RQ9M - Boys Sports Jackets", "VQ5C - Ladies Maxi Dresses", "JX3V - Maternity Beachwear",
-    "QP7Q - Ladies Beach Tie-knot Briefs", "RC2G - Mens Pyjama Bottoms", "MR5H - Ladies Slipdresses", "VR9C - Ladies Beach Folded Briefs",
-    "GJ7Q - Mens Cargo Trousers", "QP6C - Mens Coats", "WX7F - Sports Socks", "QG3J - Mens Bathrobes", "PC6F - Ladies Loungewear Bottoms",
-    "CR2R - Boys Onesies (incl. box suit)", "CG9P - Mens Denim Jackets", "GC4C - Girls Sports Pants", "FW7H - Sarongs",
-    "JF3J - Ladies Leather & PU Outerwear", "HF8C - Ladies Loose Collars", "GR5X - Ladies Tunics Knitted", "GW7V - Ladies House Suits",
-    "JM9C - Ladies Halter Bikini Tops", "QW5F - Ladies Swimsuits Cupsizes", "QG9J - Mens Briefs", "WR9M - Girls Sports Shorts",
-    "MG6C - Girls Sports Sweaters", "XR3P - Mens Nightwear Other", "VJ6M - Maternity Tops", "PR4C - Legwear Other", "XH6R - Mens Underwear Vests",
-    "GR7H - Boys Sets", "RX4Q - Baby Boxkleden", "FR6F - Mens Beachwear Other", "HX2W - Ladies Shapewear Bottoms Other",
-    "GR6C - Girls Swimsuits", "MP9X - Ladies Minimizers", "JF7F - Girls Underwear (incl. romper)", "PV9M - Ladies Boleros",
-    "MF4G - Mens Rain Coats", "FC2C - Mens Pyjama Tops", "GX6W - Ladies Tankini Tops", "XQ2H - Mens Underwear Sports",
-    "QH5X - Mattress Protectors", "FG7P - Mens Leather Jackets", "CX7X - Ladies Maternity Bras", "GQ4R - Ladies Lingerie Other",
-    "MR7H - Ladies Shapewear Dresses", "MP8W - Girls Sportswear Other", "HV9C - Ladies Sports Tracksuits", "VP4Q - Girls Sports Tracksuits",
-    "CJ9P - Ladies Tops (Alliance)", "QF6P - Girls Outerwear", "VQ4Q - Mens Socks", "GC3Q - Ladies Coats", "QV4P - Childrens Socks",
-    "XW9C - Ladies Bikini Tops Other", "PM9Q - Mens T-shirts", "FM4M - Ladies Wired Bras", "GP8C - Ladies Loungewear Tops",
-    "XM7V - Girls Dresses", "RH2R - Mens Denim Shorts", "FX5J - Mens Swim Boxers", "WH9C - Ladies Padded Bras",
-    "XF6C - Mens Sweats Cardigan", "JM7P - Boys Jeans", "XV9J - Ladies Bottoms Other", "FX5W - Maternity Bottoms", "VM3J - Ladies Gloves",
-    "XH7Q - Girls Leggings", "JH5H - Ladies Bras Other", "JQ9F - Ladies Tights", "RX9H - Mens Sports Tracksuits", "XF2F - Mens Sports Pants",
-    "CX2P - Boys Longsleeves", "PG9M - Boys Swim Shorts", "HG6M - Girls Sets", "VQ7P - Ladies Underwear Accessories", "VC9M - Ladies Bandeau Bikini Tops",
-    "RF7M - Boys Sports Shorts", "VG7V - Mens Gloves", "VX9V - Kitchen & Table Textiles"
-]
-
-suppliers = [
-    "Sisters Point A/S", "Sassa Mode GmbH", "Underwear Sweden AB", 
-    "ABA Fashion Limited", "Mos Mosh A/S", "Zizzi Denmark ApS", 
-    "Lee Tai Sang Swimwear Factory Ltd", "Mac Mode GmbH & Co. KGaA", "Dutch Home Company B.V/Arli Group B.V.", 
-    "B-Boo Baby & Lifestyle GmbH", "DK Company Vejle A/S", "TGS DIS TICARET A.S.",
-    "Tas Textiles India Private Ltd.", "DKH Retail Limited", "Röhnisch Sportswear AB",
-    "Madam Stoltz Aps", "Threebyone Europe AB", "Sofie Schnoor A/S", "Lyle & Scott Ltd", 
-    "Nümph A/S", "Levi Strauss & Co Europe", "Modström", "JL Company Ltd", "Aim Apparel AB", "Guess Europe sagl", 
-    "Soya Concept as", "Töjfabrik Aps / Wear Group A/S", "Bloomingville A/S", "Tenson AB", "United Swimwear Apparel Co.,Ltd", 
-    "Falke KGAA", "Jack Wolfskin Retail GmbH", "Moss CPH A/S", "Van De Velde NV", "Ralph Lauren France Sas", 
-    "Killtec Sport- und Freizeit GmbH", "EOZ NV", "Tonsure ApS", "Champion Products Europe Ltd.", "Magic Apparels Ltd./Red Button", 
-    "Mamsy", "ILERI GIYIM SAN VE DIS TIC.STI.", "Zhejiang Sungin Industry Group co.,Ltd.", "Playshoes GmbH", "Rosemunde Aps", 
-    "Society of Lifestyle APS", "Noman Terry Towel Mills Limited", "Ningbo China-Blue Fashion Co., Ltd", "All Sport N.V.", 
-    "Brands4kids A/S", "Sweatertech Ltd.", "Brands of Scandinavia A/S", "CWF Children Worldwide Fashion", "Nore Tekstil Sanayi Ve Ticaret Ltd.Sti.", 
-    "KM Apparel Knit (Pvt) Ltd.", "Udare Ltd.", "CKS Fashion", "King Wings International Trading Co., Ltd", "A.R.W. NV", 
-    "Ningbo Leader Garment Co. LTD", "VERVALLEN Focus International Ltd", "W.S. Engross APS", "Sona Enterprises", "Renfold Ltd", 
-    "CECEBA Group GmbH", "Sandgaard A/S", "TB International GmbH", "Kam International", "Haddad Brands Europe", "Urban Brands ApS", 
-    "Bruuns Bazaar A/S", "WDKX Ltd ($)", "Mads Norgaard - Copenhagen A/S", "Tamara Tekstil Sanayi ve Dış Ticaret Ltd Sti", 
-    "GANT DACH GmbH", "Regatta ltd.", "Mat Fashion", "Sportswear Company s.p.a.(Stone Island)", "New Visions Berlin GmbH", 
-    "Stone Island Distribution S.R.L.", "VAUDE SPORT GmbH & Co. KG", "Lexson Brands B.V.", "J Carter Sporting Club Ltd - Castore", 
-    "Nudie Jeans Marketing AB", "Marc O'Polo International GmbH", "M.G. Ekkelboom B.V.", "Liu Jo Benelux N.V.", "Treasure Will Limited", 
-    "And Bording Aps","Choice Clothing co. PVT.LTD", "Sports Group Denmark A/S", "NÜ A/S / Zoey", "Westex India", 
-    "Shiv Shakti Home", "AycemTekstil San.Tic. Ltd.ŞTİ.", "Olymp Bezner Kg", "Rugs Creation", "ISYGS", "Pacific Jeans Ltd.", 
-    "Medico sports fashion GmbH", "PNG Textiles Pvt Ltd", "Brave kid SRL", "Grimmer & Sommacal", "Felina gmbh", 
-    "Hangzhou Bestsino Imp & Exp Co Ltd", "F&H of Scandinavia A/S", "Sharda Exports", "Laaj International", "Jai Knits Creations", 
-    "Woolrich Europe S.p.A", "Bestwin (Shanghai) Home Fashion Ltd", "Didriksons Deutschland GmbH", "The Trade Aid Company", 
-    "Peninsula Fashion Knitwear Limited", "Sovedam", "Ever-Glory Int. Group Apparel inc.", "Zaber & Zubair Fabrics Ltd", 
-    "WDKX Ltd. (€)", "Yab Yum Clothing Co. Aps", "HTS Textilvertriebs GmbH", "DIESEL SPA", "Industrias Plasticas IGOR", 
-    "Fashion Club 70 N.V.", "Levi's Footwear & Accessories (Switzerland) SA", "ParkStor Tekstil Tic.Ltd.Sti.", "Sumec Textile & Light Industry Co Ltd", 
-    "Liewood A/S", "Coram DIY NV", "L.C. Jordan Company Limited", "Norban Comtex Ltd.", "Brand Machine International Limited"
-]
-
 filtered_non_material_weight_summary_df = non_material_weight_summary_df.filter(
-    F.col("mcc_3_name").isin(mcc_3_names) & F.col("preferred_supplier_name").isin(suppliers)
+    F.col("mcc_3_name").isin(UPV_MCC_3_NAMES) & F.col("preferred_supplier_name").isin(UPV_SUPPLIERS)
 )
 
 # Display the result
@@ -600,141 +583,19 @@ display(total_weight)
 
 # COMMAND ----------
 
-from pyspark.sql import functions as F
-from pyspark.sql.types import FloatType
-
-# Split "Materials_Percentages" into separate material-percentage pairs
-exploded_articles = matched_articles.withColumn(
-    "Material_Percentage_Pair", 
-    F.explode(F.split(F.concat_ws(", ", F.col("Materials_Percentages")), ", "))
-)
-
-# Extract Material
-exploded_articles = exploded_articles.withColumn(
-    "Material", F.regexp_extract(F.col("Material_Percentage_Pair"), r"^(.*?) -", 1)
-)
-
-# Extract Percentage with validation (handle empty and malformed values)
-exploded_articles = exploded_articles.withColumn(
-    "Percentage",
-    F.when(F.trim(F.regexp_extract(F.col("Material_Percentage_Pair"), r"- (\d+\.?\d*)$", 1)) != "",  
-           F.regexp_extract(F.col("Material_Percentage_Pair"), r"- (\d+\.?\d*)$", 1).cast(FloatType())
-    ).otherwise(None)  # Assign NULL for invalid values
-)
-
-# Filter out rows where Percentage is NULL (invalid/malformed input)
-exploded_articles = exploded_articles.filter(F.col("Percentage").isNotNull())
-
-# Calculate Material Weight
-exploded_articles = exploded_articles.withColumn(
-    "Material_Weight", 
-    (F.col("Percentage") / 100) * (F.col("article_gross_weight_num") / 1000) * F.col("net_despatch_qty")
-)
+# Explode matched articles using the shared helper and calculate material weight
+exploded_articles = explode_materials_with_weight(matched_articles, weight_col="Material_Weight")
 
 # Aggregate material weights
 material_weight_summary_df = exploded_articles.groupBy(
-    "Material", "mcc_3_name", "preferred_supplier_name", "article_desc", 
+    "Material", "mcc_3_name", "preferred_supplier_name", "article_desc",
     "article_id", "business_model_desc", "country_code", "net_despatch_qty"
 ).agg(
     F.round(F.sum("Material_Weight"), 2).alias("Total_Weight")
 )
 
-# List of specific mcc_3_name values
-mcc_3_names = [
-    "PW7C - Mens Casual Trousers", "MX5M - Ladies Shorts", "RX5X - Ladies Jeans",
-    "WX6H - Ladies Briefs", "FJ3G - Ladies Cardigans", "JC9C - Ladies T-shirts",
-    "VW7V - Ladies Jackets", "QM2R - Ladies Non-wired Bras", "CW4M - Ladies Denim Shorts",
-    "CR9V - Ladies Beach Bottoms Other", "WG8G - Ladies Knitwear Other", "PX8M - Ladies Pullovers",
-    "RQ7H - Mens Chino", "RJ6J - Ladies Trousers", "WR2V - Baby Changing & Bath",
-    "MP4C - Ladies Capris", "RX9Q - Girls Pullovers & Sweats", "PX4F - Ladies Tops Knitted",
-    "XR5Q - Girls Longsleeves", "FH8X - Ladies Dresses (Alliance)", "VM8G - Mens Knitwear",
-    "VX9M - Ladies Singlets", "VP9Q - Girls Shortsleeves", "RM8Q - Ladies Sports Shirts",
-    "CR2C - Girls Skirts", "VC7R - Mens Sweats", "CR5F - Cushion & Covers", "XJ9X - Mens Formal Shirts",
-    "FH4W - Ladies Pyjama Tops", "QJ6F - Mens Polos", "WF2V - Mens Sports Sweaters", "QH3G - Ladies Outerwear Other",
-    "QW3G - Ladies Sports Sweaters", "JF2G - Ladies Sweaters", "PJ6M - Mens Casual Shirts", "GJ2M - Ladies Blazers",
-    "HP6V - Ladies Tops Woven", "XF6P - Ladies Sports Pants", "QR5C - Ladies Fashion Scarves", "MJ4J - Girls Shorts",
-    "CH3F - Mens Jackets", "VM2R - Ladies Nightwear Other", "MF5G - Boys Shortsleeves", "XJ2G - Mens Jeans",
-    "GQ8F - Ladies Skirts", "RF4H - Ladies Dresses Knitted", "PR4R - Ladies Pushup Bikini Tops", "CP7W - Ladies Socks",
-    "CJ2M - Girls Jeans", "HR6Q - Ladies Bodies", "JP8V - Ladies Sports Jackets", "JV2G - Boys Shirts",
-    "QP9R - Ladies Winter Scarves", "GJ7C - Mens Ski Socks", "VW5W - Ladies Shapewear Shorts", "RJ2X - Ladies Underwire Bikini Tops",
-    "WJ8F - Girls Bikinis Other", "WG6P - Ladies Underwear Vests", "VR8F - Ladies Sports Shorts", "WF7W - Mens Sports Shirts",
-    "HQ9H - Ladies Blouses", "MR9F - Ladies Sportswear Other", "CR9W - Ladies Beach Briefs", "WG4H - Boys Pullovers & Sweats",
-    "HP9V - Ladies Jegging", "HG2R - Girls Beachwear Other", "GP2Q - Ladies Hipsters", "FC5R - Maternity Other",
-    "CQ8F - Ladies Jumpsuits", "PJ3F - Girls Trousers", "QV3M - Mens Formal Jackets", "RX2Q - Boys Sleepwear", "JH2J - Baby Bedding",
-    "JQ4R - Ladies Sports Bras", "GF6R - Mens Parka Jackets", "XV5X - Boys Outerwear", "CJ3X - Bath Textiles",
-    "GP7G - Ladies Push-up Bras", "VQ9M - Mens Jogging Bottoms", "QV9X - Boys Trousers", "XR8H - Girls Sport Swimsuits",
-    "XF2X - Ladies Treggings", "QC6C - Boys Shorts", "PM6X - Mens Loungewear Bottoms", "MG8M - Girls Jumpsuits (incl. box suit)",
-    "XP7F - Ladies Shapewear Vests", "HF2C - Ladies Sport Swimsuits", "MP7R - Ladies Padded Outerwear", "HF5G - Duvet Cover Sets",
-    "QR5F - Ladies Shaping Swimsuits Cupsizes", "PF6M - Mens Swim Shorts", "QF5J - Mens Sports Jackets", "JX5C - Mens Bodywarmers",
-    "MH7R - Ladies Nightshirts", "VQ4H - Ladies Bermuda Shorts", "QH5V - Mens Underwear Other", "HC5X - Ladies Pyjama Sets",
-    "CJ6J - Mens Pyjama Sets", "RQ6Q - Ladies Bikini Sets", "PJ4H - Ladies Dresses Woven", "CJ5J - Ladies Shortamas",
-    "FX7W - Beachwear Clothing", "WR6C - Ladies Denim Jackets", "VJ2G - Boys Sports Pants", "JQ4C - Ladies Shaping Swimsuits",
-    "WF9G - Mens Winter Scarves", "FQ6W - Ladies Raincoats", "FM5M - Ladies Tunics Woven", "PM8G - Mens Chino Shorts",
-    "QX2V - Pillowcases", "GF7X - Boys Swim Boxers", "QX4M - Ladies Ski Socks", "MQ3P - Mens Sports Shorts", "JC9H - Ladies Leggings",
-    "QC6V - Ladies Parkas", "MQ3M - Ladies Brazilians", "HR7P - Girls Sports Jackets", "WQ2V - Mens Padded Coats",
-    "QG3P - Boys Sports Tracksuits", "MG4X - Mens Boxershorts", "WJ3X - Ladies Underwear Shorts", "FQ2X - Ladies Thongs",
-    "CM8Q - Girls Tights", "FG3M - Mens Knit Cardigans", "CR9M - Ladies Bodies Shapewear", "WR4V - Mens Shorts Other",
-    "PC3H - Boys Underwear (incl. romper)", "MW2V - Girls Sleepwear", "PC7X - Boys Beachwear Other", "WR8H - Mens Underwear T-shirts",
-    "WX9G - Ladies Bathrobes", "CQ4Q - Ladies Playsuits", "XW5R - Girls Sports Shirts", "PJ4P - Ties & Bow Ties",
-    "QR8Q - Ladies Triangle Bikini Tops", "GJ5Q - Childrens Ski Socks", "WV8R - Ladies Crop Bikini Tops", "GP4H - Fitted Sheets",
-    "HX9G - Ladies Shapewear Briefs", "PV3C - Girls Triangle Bikinis", "JF7J - Mens Sweat Shorts", "XP4R - Boys Sports Sweaters",
-    "XH2X - Ladies Pyjama Bottoms", "CQ4G - Ladies Swimsuits", "VW2F - Boys Sports Shirts", "FR2H - Mens Thermo", "HC2X - Beach Towels",
-    "XF6Q - Mens Loungewear Tops", "HM9W - Ladies Maxibriefs", "WX8P - Ladies Tunics (Alliance)", "RV2M - Mens Cargo Shorts",
-    "CJ7P - Mens Fashion Scarves", "RQ9M - Boys Sports Jackets", "VQ5C - Ladies Maxi Dresses", "JX3V - Maternity Beachwear",
-    "QP7Q - Ladies Beach Tie-knot Briefs", "RC2G - Mens Pyjama Bottoms", "MR5H - Ladies Slipdresses", "VR9C - Ladies Beach Folded Briefs",
-    "GJ7Q - Mens Cargo Trousers", "QP6C - Mens Coats", "WX7F - Sports Socks", "QG3J - Mens Bathrobes", "PC6F - Ladies Loungewear Bottoms",
-    "CR2R - Boys Onesies (incl. box suit)", "CG9P - Mens Denim Jackets", "GC4C - Girls Sports Pants", "FW7H - Sarongs",
-    "JF3J - Ladies Leather & PU Outerwear", "HF8C - Ladies Loose Collars", "GR5X - Ladies Tunics Knitted", "GW7V - Ladies House Suits",
-    "JM9C - Ladies Halter Bikini Tops", "QW5F - Ladies Swimsuits Cupsizes", "QG9J - Mens Briefs", "WR9M - Girls Sports Shorts",
-    "MG6C - Girls Sports Sweaters", "XR3P - Mens Nightwear Other", "VJ6M - Maternity Tops", "PR4C - Legwear Other", "XH6R - Mens Underwear Vests",
-    "GR7H - Boys Sets", "RX4Q - Baby Boxkleden", "FR6F - Mens Beachwear Other", "HX2W - Ladies Shapewear Bottoms Other",
-    "GR6C - Girls Swimsuits", "MP9X - Ladies Minimizers", "JF7F - Girls Underwear (incl. romper)", "PV9M - Ladies Boleros",
-    "MF4G - Mens Rain Coats", "FC2C - Mens Pyjama Tops", "GX6W - Ladies Tankini Tops", "XQ2H - Mens Underwear Sports",
-    "QH5X - Mattress Protectors", "FG7P - Mens Leather Jackets", "CX7X - Ladies Maternity Bras", "GQ4R - Ladies Lingerie Other",
-    "MR7H - Ladies Shapewear Dresses", "MP8W - Girls Sportswear Other", "HV9C - Ladies Sports Tracksuits", "VP4Q - Girls Sports Tracksuits",
-    "CJ9P - Ladies Tops (Alliance)", "QF6P - Girls Outerwear", "VQ4Q - Mens Socks", "GC3Q - Ladies Coats", "QV4P - Childrens Socks",
-    "XW9C - Ladies Bikini Tops Other", "PM9Q - Mens T-shirts", "FM4M - Ladies Wired Bras", "GP8C - Ladies Loungewear Tops",
-    "XM7V - Girls Dresses", "RH2R - Mens Denim Shorts", "FX5J - Mens Swim Boxers", "WH9C - Ladies Padded Bras",
-    "XF6C - Mens Sweats Cardigan", "JM7P - Boys Jeans", "XV9J - Ladies Bottoms Other", "FX5W - Maternity Bottoms", "VM3J - Ladies Gloves",
-    "XH7Q - Girls Leggings", "JH5H - Ladies Bras Other", "JQ9F - Ladies Tights", "RX9H - Mens Sports Tracksuits", "XF2F - Mens Sports Pants",
-    "CX2P - Boys Longsleeves", "PG9M - Boys Swim Shorts", "HG6M - Girls Sets", "VQ7P - Ladies Underwear Accessories", "VC9M - Ladies Bandeau Bikini Tops",
-    "RF7M - Boys Sports Shorts", "VG7V - Mens Gloves", "VX9V - Kitchen & Table Textiles"
-]
-
-suppliers = [
-    "Sisters Point A/S", "Sassa Mode GmbH", "Underwear Sweden AB", 
-    "ABA Fashion Limited", "Mos Mosh A/S", "Zizzi Denmark ApS", 
-    "Lee Tai Sang Swimwear Factory Ltd", "Mac Mode GmbH & Co. KGaA", "Dutch Home Company B.V/Arli Group B.V.", 
-    "B-Boo Baby & Lifestyle GmbH", "DK Company Vejle A/S", "TGS DIS TICARET A.S.",
-    "Tas Textiles India Private Ltd.", "DKH Retail Limited", "Röhnisch Sportswear AB",
-    "Madam Stoltz Aps", "Threebyone Europe AB", "Sofie Schnoor A/S", "Lyle & Scott Ltd", 
-    "Nümph A/S", "Levi Strauss & Co Europe", "Modström", "JL Company Ltd", "Aim Apparel AB", "Guess Europe sagl", 
-    "Soya Concept as", "Töjfabrik Aps / Wear Group A/S", "Bloomingville A/S", "Tenson AB", "United Swimwear Apparel Co.,Ltd", 
-    "Falke KGAA", "Jack Wolfskin Retail GmbH", "Moss CPH A/S", "Van De Velde NV", "Ralph Lauren France Sas", 
-    "Killtec Sport- und Freizeit GmbH", "EOZ NV", "Tonsure ApS", "Champion Products Europe Ltd.", "Magic Apparels Ltd./Red Button", 
-    "Mamsy", "ILERI GIYIM SAN VE DIS TIC.STI.", "Zhejiang Sungin Industry Group co.,Ltd.", "Playshoes GmbH", "Rosemunde Aps", 
-    "Society of Lifestyle APS", "Noman Terry Towel Mills Limited", "Ningbo China-Blue Fashion Co., Ltd", "All Sport N.V.", 
-    "Brands4kids A/S", "Sweatertech Ltd.", "Brands of Scandinavia A/S", "CWF Children Worldwide Fashion", "Nore Tekstil Sanayi Ve Ticaret Ltd.Sti.", 
-    "KM Apparel Knit (Pvt) Ltd.", "Udare Ltd.", "CKS Fashion", "King Wings International Trading Co., Ltd", "A.R.W. NV", 
-    "Ningbo Leader Garment Co. LTD", "VERVALLEN Focus International Ltd", "W.S. Engross APS", "Sona Enterprises", "Renfold Ltd", 
-    "CECEBA Group GmbH", "Sandgaard A/S", "TB International GmbH", "Kam International", "Haddad Brands Europe", "Urban Brands ApS", 
-    "Bruuns Bazaar A/S", "WDKX Ltd ($)", "Mads Norgaard - Copenhagen A/S", "Tamara Tekstil Sanayi ve Dış Ticaret Ltd Sti", 
-    "GANT DACH GmbH", "Regatta ltd.", "Mat Fashion", "Sportswear Company s.p.a.(Stone Island)", "New Visions Berlin GmbH", 
-    "Stone Island Distribution S.R.L.", "VAUDE SPORT GmbH & Co. KG", "Lexson Brands B.V.", "J Carter Sporting Club Ltd - Castore", 
-    "Nudie Jeans Marketing AB", "Marc O'Polo International GmbH", "M.G. Ekkelboom B.V.", "Liu Jo Benelux N.V.", "Treasure Will Limited", 
-    "And Bording Aps", "Choice Clothing co. PVT.LTD", "Sports Group Denmark A/S", "NÜ A/S / Zoey", "Westex India", 
-    "Shiv Shakti Home", "AycemTekstil San.Tic. Ltd.ŞTİ.", "Olymp Bezner Kg", "Rugs Creation", "ISYGS", "Pacific Jeans Ltd.", 
-    "Medico sports fashion GmbH", "PNG Textiles Pvt Ltd", "Brave kid SRL", "Grimmer & Sommacal", "Felina gmbh", 
-    "Hangzhou Bestsino Imp & Exp Co Ltd", "F&H of Scandinavia A/S", "Sharda Exports", "Laaj International", "Jai Knits Creations", 
-    "Woolrich Europe S.p.A", "Bestwin (Shanghai) Home Fashion Ltd", "Didriksons Deutschland GmbH", "The Trade Aid Company", 
-    "Peninsula Fashion Knitwear Limited", "Sovedam", "Ever-Glory Int. Group Apparel inc.", "Zaber & Zubair Fabrics Ltd", 
-    "WDKX Ltd. (€)", "Yab Yum Clothing Co. Aps", "HTS Textilvertriebs GmbH", "DIESEL SPA", "Industrias Plasticas IGOR", 
-    "Fashion Club 70 N.V.", "Levi's Footwear & Accessories (Switzerland) SA", "ParkStor Tekstil Tic.Ltd.Sti.", "Sumec Textile & Light Industry Co Ltd", 
-    "Liewood A/S", "Coram DIY NV", "L.C. Jordan Company Limited", "Norban Comtex Ltd.", "Brand Machine International Limited"
-]
-
 filtered_material_weight_summary_df = material_weight_summary_df.filter(
-    F.col("mcc_3_name").isin(mcc_3_names) & F.col("preferred_supplier_name").isin(suppliers)
+    F.col("mcc_3_name").isin(UPV_MCC_3_NAMES) & F.col("preferred_supplier_name").isin(UPV_SUPPLIERS)
 )
 
 
